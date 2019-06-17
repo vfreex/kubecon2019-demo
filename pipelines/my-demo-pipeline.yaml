@@ -1,0 +1,51 @@
+kind: "BuildConfig"
+apiVersion: "v1"
+metadata:
+  name: "my-demo-pipeline"
+spec:
+  strategy:
+    jenkinsPipelineStrategy:
+      jenkinsfile: |-
+        pipeline {
+          agent {
+            kubernetes {
+              cloud 'openshift'
+              label "jenkins-slave-${UUID.randomUUID().toString()}"
+              yaml """
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                labels:
+                  app: "my-jenkins-slave"
+              spec:
+                containers:
+                - name: jnlp
+                  image: docker.io/openshift/jenkins-slave-base-centos7:latest
+                  resources:
+                    requests:
+                      memory: 368Mi
+                      cpu: 200m
+                    limits:
+                      memory: 512Mi
+                      cpu: 300m
+              """
+            }
+          }
+          stages {
+            stage('build') {
+              steps {
+                echo "Building..."
+              }
+            }
+            stage('test') {
+              steps {
+                echo "Testing..."
+              }
+            }
+            stage('deploy') {
+              steps {
+                echo "Deploying..."
+              }
+            }
+          }
+        }

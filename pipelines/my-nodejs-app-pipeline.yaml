@@ -1,0 +1,120 @@
+kind: "BuildConfig"
+apiVersion: "v1"
+metadata:
+  name: "my-nodejs-app-pipeline"
+spec:
+  strategy:
+    jenkinsPipelineStrategy:
+      jenkinsfile: |-
+        def app_src_repo='https://github.com/vfreex/nodejs-ex.git'
+        pipeline {
+          agent {
+            kubernetes {
+              cloud 'openshift'
+              label "jenkins-slave-${UUID.randomUUID().toString()}"
+              serviceAccount 'jenkins'
+              yaml """
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                labels:
+                  app: "my-jenkins-slave"
+              spec:
+                containers:
+                - name: jnlp
+                  image: docker.io/openshift/jenkins-slave-base-centos7:latest
+                  resources:
+                    requests:
+                      memory: 368Mi
+                      cpu: 200m
+                    limits:
+                      memory: 512Mi
+                      cpu: 300m
+              """
+            }
+          }
+          stages {
+            stage('create') {
+              steps {
+                echo "Creating..."
+                script {
+                  openshift.withCluster() {
+                    def processed = openshift.process('openshift//nodejs-mongo-persistent',
+                      '-p', 'NAME=my-app',
+                      '-p', "SOURCE_REPOSITORY_URL=${app_src_repo}",
+                      '-p', "MEMORY_LIMIT=1Gi",
+                      '-p', "MEMORY_MONGODB_LIMIT=1Gi",
+                      '-p', "VOLUME_CAPACITY=5Gi",
+                      )
+                    def created = openshift.apply(processed)
+                    echo "The template instantiated: ${created.names()}"
+                  }
+                }
+              }
+            }
+            stage('build') {
+              steps {
+                echo "Building..."
+                script {
+                  openshift.withCluster() {
+                    def bc = openshift.selector('bc', 'my-app')
+                    def builds = bc.related('builds')
+                    // There are no guarantees in life, so let's interrupt these operations if they
+                    // take more than 10 minutes and fail this script.
+                    timeout(10) {
+                        // We can use watch to execute a closure body each objects selected by a Selector
+                        // change. The watch will only terminate when the body returns true.
+                        builds.watch {
+                            // Within the body, the variable 'it' is bound to the watched Selector (i.e. builds)
+                            echo "So far, ${bc.name()} has created builds: ${it.names()}"
+
+                            // End the watch only once a build object has been created.
+                            return it.count() > 0
+                        }
+
+                        // But we can actually want to wait for the build to complete.
+                        builds.watch {
+                            if ( it.count() == 0 ) return false
+
+                            // A robust script should not assume that only one build has been created, so
+                            // we will need to iterate through all builds.
+                            def allDone = true
+                            it.withEach {
+                                // 'it' is now bound to a Selector selecting a single object for this iteration.
+                                // Let's model it in Groovy to check its status.
+                                def buildModel = it.object()
+                                if ( it.object().status.phase != "Complete" ) {
+                                    allDone = false
+                                }
+                            }
+
+                            return allDone;
+                        }
+                    }
+                  }
+                }
+              }
+            }
+            stage('test') {
+              steps {
+                echo "Testing..."
+              }
+            }
+            stage('deploy') {
+              steps {
+                echo "Deploying..."
+                script {
+                  openshift.withCluster() {
+                    openshift.selector("dc", "my-app").rollout().latest()
+                    def latestDeploymentVersion = openshift.selector('dc', "my-app").object().status.latestVersion
+                    def rc = openshift.selector('rc', "my-app-${latestDeploymentVersion}")
+                    rc.untilEach(1){
+                        def rcMap = it.object()
+                        return (rcMap.status.replicas.equals(rcMap.status.readyReplicas))
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
